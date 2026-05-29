@@ -1,0 +1,8 @@
+# ESP-IDF project
+/build/
+/sdkconfig
+*.swp
+*.o
+*.d
+.git/
+
