@@ -13,6 +13,9 @@
 #include "freertos/queue.h"
 #include "esp_log.h"
 
+#define SAFETY_TASK_STACK_SIZE 4096
+#define SAFETY_TASK_PRIORITY   4
+
 static const char *TAG = "SAFETY";
 
 static TaskHandle_t s_safety_task_handle = NULL;
@@ -38,8 +41,8 @@ esp_err_t safety_init(void) {
         return ESP_ERR_NO_MEM;
     }
 
-    // Create safety monitoring task (high priority, stack 2048)
-    BaseType_t res = xTaskCreate(safety_task, "safety_task", 2048, NULL, 4, &s_safety_task_handle);
+    // Create safety monitoring task (high priority, stack 4096)
+    BaseType_t res = xTaskCreate(safety_task, "safety_task", SAFETY_TASK_STACK_SIZE, NULL, SAFETY_TASK_PRIORITY, &s_safety_task_handle);
     if (res != pdPASS) {
         ESP_LOGE(TAG, "Failed to create safety task");
         return ESP_ERR_NO_MEM;

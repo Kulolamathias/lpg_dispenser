@@ -76,7 +76,7 @@ void display_manager_update(system_state_t state, float empty_mass, float paid,
             lcd_set_cursor(s_lcd, 0, 0);
             lcd_print_str(s_lcd, "LPG Dispenser Ready");
             lcd_set_cursor(s_lcd, 1, 0);
-            lcd_print_str(s_lcd, "Press Start for $");
+            lcd_print_str(s_lcd, "Press Start for TSHs");
             lcd_set_cursor(s_lcd, 2, 0);
             lcd_printf(s_lcd, "Price/kg: %.2f", loadcell_get_price_per_kg());
             lcd_set_cursor(s_lcd, 3, 0);
@@ -87,7 +87,7 @@ void display_manager_update(system_state_t state, float empty_mass, float paid,
             lcd_set_cursor(s_lcd, 0, 0);
             lcd_print_str(s_lcd, "Enter Amount:");
             lcd_set_cursor(s_lcd, 1, 0);
-            lcd_printf(s_lcd, "$ %s", price_buffer);
+            lcd_printf(s_lcd, "TSHs %s", price_buffer);
             lcd_set_cursor(s_lcd, 2, 0);
             lcd_print_str(s_lcd, "Press # to confirm");
             lcd_set_cursor(s_lcd, 3, 0);
@@ -96,7 +96,7 @@ void display_manager_update(system_state_t state, float empty_mass, float paid,
 
         case STATE_READY:
             lcd_set_cursor(s_lcd, 0, 0);
-            lcd_printf(s_lcd, "Paid: $ %.2f", paid);
+            lcd_printf(s_lcd, "Paid: TSHs %.2f", paid);
             lcd_set_cursor(s_lcd, 1, 0);
             lcd_printf(s_lcd, "Target: %.2f kg", paid / loadcell_get_price_per_kg());
             lcd_set_cursor(s_lcd, 2, 0);
@@ -110,7 +110,7 @@ void display_manager_update(system_state_t state, float empty_mass, float paid,
             lcd_set_cursor(s_lcd, 0, 0);
             lcd_printf(s_lcd, "Empty: %.2f kg", empty_mass);
             lcd_set_cursor(s_lcd, 1, 0);
-            lcd_printf(s_lcd, "Paid: $ %.2f", paid);
+            lcd_printf(s_lcd, "Paid: TSHs %.2f", paid);
             lcd_set_cursor(s_lcd, 2, 0);
             lcd_printf(s_lcd, "Disp: %.2f / %.2f kg", dispensed, paid / loadcell_get_price_per_kg());
             lcd_set_cursor(s_lcd, 3, 0);
@@ -158,7 +158,7 @@ static void display_manager_calibration_draw(void) {
             lcd_set_cursor(s_lcd, 0, 0);
             lcd_print_str(s_lcd, "Calib: Known Mass");
             lcd_set_cursor(s_lcd, 1, 0);
-            lcd_printf(s_lcd, "Enter mass (kg): %s", s_calib_buffer);
+            lcd_printf(s_lcd, "Enter mass (g): %s", s_calib_buffer);
             lcd_set_cursor(s_lcd, 2, 0);
             lcd_print_str(s_lcd, "Place mass & #");
             lcd_set_cursor(s_lcd, 3, 0);
@@ -196,8 +196,6 @@ void display_manager_calibration_key(char key) {
         if (key == '#') {
             s_calib_step = CALIB_ZERO;
         } else if (key == 'D' || key == 'd') {
-            // Exit calibration via state machine (handled by button)
-            // But we can also trigger state change? For now, just clear.
             s_calib_step = CALIB_NONE;
             statemachine_set_state(STATE_IDLE);
         }
@@ -214,9 +212,11 @@ void display_manager_calibration_key(char key) {
                 s_calib_buffer[s_calib_len++] = key;
             }
         } else if (key == KEYPAD_ENTER_KEY) {
-            s_calib_known_mass = atof(s_calib_buffer);
-            if (s_calib_known_mass > 0) {
-                loadcell_calibrate(s_calib_known_mass);
+            float grams = atof(s_calib_buffer);
+            if (grams > 0) {
+                float kg = grams / 1000.0f;          // Convert grams to kilograms
+                loadcell_calibrate(kg);
+                ESP_LOGI(TAG, "Calibrated with %.0f g (%.3f kg)", grams, kg);
                 s_calib_step = CALIB_PRICE;
                 memset(s_calib_buffer, 0, sizeof(s_calib_buffer));
                 s_calib_len = 0;

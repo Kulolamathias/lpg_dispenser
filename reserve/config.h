@@ -1,18 +1,14 @@
-// config.h
-// LPG Dispenser - Pin assignments, thresholds, and configurable macros
-// All values are scalable for future WiFi/MQTT integration
-
+// config.h for ESP32-S3
 #pragma once
 
 // ==================== Load Cell (HX711) ====================
 #define LOADCELL_DT_GPIO           12
 #define LOADCELL_SCK_GPIO          13
 #define LOADCELL_MAX_KG            20.0f
-#define LOADCELL_DEFAULT_ZERO      0.0f
 
 // Pre‑determined scale factor from calibration with 229g = 0.229 kg
 // This gives kg per raw count (0.229 / delta_raw).
-// Using the value I got from a successful calibration: 0.000436
+// Use the value you got from a successful calibration: 0.000436
 #define LOADCELL_DEFAULT_SLOPE     0.000436f
 
 // ==================== LCD (I2C) ====================
