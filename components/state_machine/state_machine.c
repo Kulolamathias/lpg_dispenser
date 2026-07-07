@@ -74,9 +74,27 @@ void statemachine_set_state(system_state_t new_state) {
                 s_already_dispensed_kg = 0.0f;
             }
             relay_on();
-            // Add delay to let HX711 stabilise after relay turn‑on
-            vTaskDelay(pdMS_TO_TICKS(200));
-            // safety_set_monitoring(true);   // <-- DISABLED for testing
+            // Add longer, configurable settle delay (600 ms)
+            #define RELAY_SETTLE_MS 600
+            vTaskDelay(pdMS_TO_TICKS(RELAY_SETTLE_MS));
+            // Re‑enable safety monitoring after relay on
+            safety_set_monitoring(true);
+            // ---- verify HX711 is providing data ----
+            static const int SENSOR_RETRY_COUNT = 5;
+            static const TickType_t SENSOR_WAIT_TICKS = pdMS_TO_TICKS(200);
+            bool sensor_ok = false;
+            for (int i = 0; i < SENSOR_RETRY_COUNT; ++i) {
+                float mass = loadcell_read_kg();
+                if (mass > 0.0f) { sensor_ok = true; break; }
+                vTaskDelay(SENSOR_WAIT_TICKS);
+            }
+            if (!sensor_ok) {
+                ESP_LOGW(TAG, "Load‑cell not responding after relay on – aborting dispense");
+                statemachine_set_state(STATE_SAFETY_STOP);
+                break; // exit case block
+            }
+            // keep the original initial‑mass capture
+            s_initial_mass_kg = loadcell_read_kg();
             break;
         case STATE_PAUSED:
             relay_off();

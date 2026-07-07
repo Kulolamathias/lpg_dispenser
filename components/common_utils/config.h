@@ -5,8 +5,8 @@
 #pragma once
 
 // ==================== Load Cell (HX711) ====================
-#define LOADCELL_DT_GPIO           12
-#define LOADCELL_SCK_GPIO          13
+#define LOADCELL_DT_GPIO           5
+#define LOADCELL_SCK_GPIO          6
 #define LOADCELL_MAX_KG            20.0f
 #define LOADCELL_DEFAULT_ZERO      0.0f
 
@@ -23,7 +23,7 @@
 #define LCD_ROWS                   4
 
 // ==================== Keypad 4x4 ====================
-#define KEYPAD_ROW_GPIO            {4, 5, 6, 7}
+#define KEYPAD_ROW_GPIO            {4, 39, 40, 7}
 #define KEYPAD_COL_GPIO            {15, 16, 17, 18}
 #define KEYPAD_ENTER_KEY           '#'
 #define KEYPAD_CLEAR_KEY           '*'
@@ -32,12 +32,12 @@
 #define BTN_START_GPIO             8
 #define BTN_STOP_GPIO              9
 #define BTN_RESET_GPIO             10
-#define BTN_MODE_GPIO              11
+#define BTN_MODE_GPIO              21
 #define BTN_DEBOUNCE_MS            50
 #define BTN_RESET_LONG_PRESS_MS    1000
 
 // ==================== Relay ====================
-#define RELAY_GPIO                 13
+#define RELAY_GPIO                 38
 #define RELAY_ACTIVE_HIGH          1
 #if RELAY_ACTIVE_HIGH
     #define RELAY_ON_STATE         1
@@ -48,7 +48,7 @@
 #endif
 
 // ==================== Safety ====================
-#define SAFETY_MASS_DROP_THRESHOLD_GRAMS   500   // Increased to avoid false triggers
+#define SAFETY_MASS_DROP_THRESHOLD_GRAMS   3000   // Increased to avoid false triggers
 #define SAFETY_SAMPLE_INTERVAL_MS          50
 #define SAFETY_MIN_MASS_TO_MONITOR_GRAMS   200
 
