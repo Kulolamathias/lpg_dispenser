@@ -67,6 +67,9 @@ bool safety_is_triggered(void) {
 
 void safety_clear_trigger(void) {
     s_safety_triggered = false;
+    if (s_safety_event_queue) {
+        xQueueReset(s_safety_event_queue);
+    }
     ESP_LOGI(TAG, "Safety trigger cleared");
 }
 

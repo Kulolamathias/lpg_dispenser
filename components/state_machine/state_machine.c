@@ -31,9 +31,13 @@ static float s_price_per_kg = 0.0f;
 static float s_target_kg = 0.0f;
 static float s_initial_mass_kg = 0.0f;
 static float s_already_dispensed_kg = 0.0f;
+static float s_completed_dispensed_kg = 0.0f;
+static float s_completed_total_kg = 0.0f;
 static bool s_safety_monitoring_armed = false;
+static bool s_dispense_measuring = false;
 static uint32_t s_safety_enable_ms = 0;
 static uint8_t s_target_hit_count = 0;
+static uint32_t s_complete_until_ms = 0;
 static bool s_display_dirty = true;
 static uint32_t s_last_display_ms = 0;
 
@@ -90,7 +94,9 @@ void statemachine_set_state(system_state_t new_state) {
             safety_set_monitoring(false);
             safety_clear_trigger();
             s_safety_monitoring_armed = false;
+            s_dispense_measuring = false;
             s_target_hit_count = 0;
+            s_complete_until_ms = 0;
             break;
         case STATE_PRICE_ENTRY:
             memset(s_price_buffer, 0, sizeof(s_price_buffer));
@@ -109,6 +115,7 @@ void statemachine_set_state(system_state_t new_state) {
                 statemachine_set_state(STATE_SAFETY_STOP);
                 break;
             }
+            safety_clear_trigger();
             if (s_previous_state == STATE_PAUSED) {
                 s_initial_mass_kg = loadcell_get_latest_kg();
             } else {
@@ -118,10 +125,11 @@ void statemachine_set_state(system_state_t new_state) {
             s_target_hit_count = 0;
             relay_on();
             s_safety_monitoring_armed = false;
+            s_dispense_measuring = false;
             s_safety_enable_ms = now_ms() + RELAY_SETTLE_MS;
             break;
         case STATE_PAUSED:
-            if (s_previous_state == STATE_DISPENSING) {
+            if (s_previous_state == STATE_DISPENSING && s_dispense_measuring) {
                 float current_mass = loadcell_get_latest_kg();
                 s_already_dispensed_kg = calculate_dispensed(current_mass);
                 s_initial_mass_kg = current_mass;
@@ -129,18 +137,29 @@ void statemachine_set_state(system_state_t new_state) {
             relay_off();
             safety_set_monitoring(false);
             s_safety_monitoring_armed = false;
+            s_dispense_measuring = false;
             s_target_hit_count = 0;
+            break;
+        case STATE_COMPLETE:
+            relay_off();
+            safety_set_monitoring(false);
+            s_safety_monitoring_armed = false;
+            s_dispense_measuring = false;
+            s_target_hit_count = 0;
+            s_complete_until_ms = now_ms() + DISPENSE_COMPLETE_DISPLAY_MS;
             break;
         case STATE_SAFETY_STOP:
             relay_off();
             safety_set_monitoring(false);
             s_safety_monitoring_armed = false;
+            s_dispense_measuring = false;
             s_target_hit_count = 0;
             break;
         case STATE_CALIBRATION:
             relay_off();
             safety_set_monitoring(false);
             s_safety_monitoring_armed = false;
+            s_dispense_measuring = false;
             s_target_hit_count = 0;
             break;
     }
@@ -208,6 +227,27 @@ static void process_keypad(void) {
 }
 
 static void state_dispensing_handler(void) {
+    if (!s_dispense_measuring) {
+        if ((int32_t)(now_ms() - s_safety_enable_ms) < 0) {
+            return;
+        }
+        if (!loadcell_has_fresh_reading(LOADCELL_STALE_TIMEOUT_MS)) {
+            ESP_LOGW(TAG, "Load-cell data stale after relay settle");
+            safety_trigger();
+            statemachine_set_state(STATE_SAFETY_STOP);
+            return;
+        }
+        s_initial_mass_kg = loadcell_get_latest_kg();
+        s_target_hit_count = 0;
+        s_dispense_measuring = true;
+        safety_set_monitoring(true);
+        s_safety_monitoring_armed = true;
+        mark_display_dirty();
+        ESP_LOGI(TAG, "Dispense measurement started: start=%.3f kg target=%.3f kg",
+                 s_initial_mass_kg, s_target_kg);
+        return;
+    }
+
     if (safety_get_event() || safety_is_triggered()) {
         statemachine_set_state(STATE_SAFETY_STOP);
         return;
@@ -223,10 +263,12 @@ static void state_dispensing_handler(void) {
     float dispensed_kg = calculate_dispensed(current_mass);
     if (target_reached(dispensed_kg)) {
         if (++s_target_hit_count >= DISPENSE_STOP_CONFIRM_COUNT) {
+            s_completed_dispensed_kg = dispensed_kg;
+            s_completed_total_kg = current_mass;
             relay_off();
             safety_set_monitoring(false);
             s_safety_monitoring_armed = false;
-            statemachine_set_state(STATE_IDLE);
+            statemachine_set_state(STATE_COMPLETE);
             ESP_LOGI(TAG, "Dispensing complete: %.3f / %.3f kg", dispensed_kg, s_target_kg);
             return;
         }
@@ -242,11 +284,10 @@ void statemachine_task(void *pvParameters) {
         process_buttons();
         process_keypad();
         if (s_current_state == STATE_DISPENSING) {
-            if (!s_safety_monitoring_armed && (int32_t)(now_ms() - s_safety_enable_ms) >= 0) {
-                safety_set_monitoring(true);
-                s_safety_monitoring_armed = true;
-            }
             state_dispensing_handler();
+        } else if (s_current_state == STATE_COMPLETE && s_complete_until_ms != 0 &&
+                   (int32_t)(now_ms() - s_complete_until_ms) >= 0) {
+            statemachine_set_state(STATE_IDLE);
         }
         if (s_display_dirty || (uint32_t)(now_ms() - s_last_display_ms) >= LCD_DYNAMIC_UPDATE_MS) {
             update_display();
@@ -265,7 +306,10 @@ static void update_display(void) {
         initial_mass = total_weight;
     }
     if (s_current_state == STATE_DISPENSING || s_current_state == STATE_PAUSED) {
-        dispensed = calculate_dispensed(total_weight);
+        dispensed = s_dispense_measuring ? calculate_dispensed(total_weight) : s_already_dispensed_kg;
+    } else if (s_current_state == STATE_COMPLETE) {
+        dispensed = s_completed_dispensed_kg;
+        total_weight = s_completed_total_kg;
     }
     display_manager_update(s_current_state, initial_mass, paid, dispensed, total_weight, s_price_buffer, s_price_len);
 }

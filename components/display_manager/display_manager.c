@@ -56,7 +56,6 @@ static void write_lines(system_state_t state, char lines[LCD_ROWS][LCD_COLS + 1]
 
     if (!s_screen_valid || state != s_last_state ||
         (state == STATE_CALIBRATION && s_calib_step != s_last_calib_step)) {
-        lcd_clear(s_lcd);
         memset(s_last_lines, 0, sizeof(s_last_lines));
         s_screen_valid = false;
         s_last_state = state;
@@ -109,7 +108,7 @@ esp_err_t display_manager_init(void) {
 }
 
 void display_manager_update(system_state_t state, float initial_mass, float paid,
-                            float dispensed, float total_weight, 
+                            float dispensed, float total_weight,
                             const char *price_buffer, uint8_t price_len) {
     if (!s_lcd) return;
     (void)price_len;
@@ -155,6 +154,13 @@ void display_manager_update(system_state_t state, float initial_mass, float paid
             } else {
                 format_line(lines[3], "Start: %.3f kg", initial_mass);
             }
+            break;
+
+        case STATE_COMPLETE:
+            format_line(lines[0], "Dispense Complete");
+            format_line(lines[1], "Added: %.3f kg", dispensed);
+            format_line(lines[2], "Tank: %.3f kg", total_weight);
+            format_line(lines[3], "Reset or wait...");
             break;
 
         case STATE_SAFETY_STOP:

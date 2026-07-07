@@ -22,6 +22,7 @@ typedef enum {
     STATE_READY,              /* Price entered, waiting for Start */
     STATE_DISPENSING,         /* Gas flowing, monitoring mass */
     STATE_PAUSED,             /* Dispensing paused, can resume */
+    STATE_COMPLETE,           /* Dispensing completed; showing summary */
     STATE_SAFETY_STOP,        /* Emergency stop due to mass drop */
     STATE_CALIBRATION         /* Calibration menu active */
 } system_state_t;
