@@ -24,6 +24,7 @@
 #define LCD_I2C_SCL_GPIO           2
 #define LCD_COLS                   20
 #define LCD_ROWS                   4
+#define LCD_DYNAMIC_UPDATE_MS      250
 
 // ==================== Keypad 4x4 ====================
 #define KEYPAD_ROW_GPIO            {4, 39, 40, 7}
@@ -58,8 +59,9 @@
 // ==================== Dispensing ====================
 #define DEFAULT_PRICE_PER_KG       2500.0f
 #define TARE_WEIGHT_DEFAULT_KG     0.0f
-#define DISPENSE_MASS_DECREASES    1
+#define DISPENSE_MASS_DECREASES    0
 #define DISPENSE_STOP_TOLERANCE_KG 0.002f
+#define DISPENSE_STOP_CONFIRM_COUNT 2
 #define STATE_MACHINE_INTERVAL_MS  50
 #define RELAY_SETTLE_MS            600
 

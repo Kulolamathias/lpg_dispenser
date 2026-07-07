@@ -108,12 +108,16 @@ esp_err_t display_manager_init(void) {
     return ESP_OK;
 }
 
-void display_manager_update(system_state_t state, float empty_mass, float paid, 
+void display_manager_update(system_state_t state, float initial_mass, float paid,
                             float dispensed, float total_weight, 
                             const char *price_buffer, uint8_t price_len) {
     if (!s_lcd) return;
     (void)price_len;
     char lines[LCD_ROWS][LCD_COLS + 1];
+    float target_kg = paid / loadcell_get_price_per_kg();
+    float percent = target_kg > 0.0f ? (dispensed * 100.0f) / target_kg : 0.0f;
+    if (percent < 0.0f) percent = 0.0f;
+    if (percent > 999.0f) percent = 999.0f;
 
     switch (state) {
         case STATE_IDLE:
@@ -131,21 +135,25 @@ void display_manager_update(system_state_t state, float empty_mass, float paid,
             break;
 
         case STATE_READY:
-            format_line(lines[0], "Paid: TSHs %.2f", paid);
-            format_line(lines[1], "Target: %.2f kg", paid / loadcell_get_price_per_kg());
-            format_line(lines[2], "Press Start");
-            format_line(lines[3], "Stop/Pause Reset");
+            format_line(lines[0], "Tank: %.3f kg", total_weight);
+            format_line(lines[1], "Gas: %.3f kg", target_kg);
+#if DISPENSE_MASS_DECREASES
+            format_line(lines[2], "After: %.3f kg", total_weight - target_kg);
+#else
+            format_line(lines[2], "After: %.3f kg", total_weight + target_kg);
+#endif
+            format_line(lines[3], "Press Start");
             break;
 
         case STATE_DISPENSING:
         case STATE_PAUSED:
-            format_line(lines[0], "Empty: %.2f kg", empty_mass);
-            format_line(lines[1], "Paid: TSHs %.2f", paid);
-            format_line(lines[2], "Disp: %.3f/%.3fkg", dispensed, paid / loadcell_get_price_per_kg());
+            format_line(lines[0], "Tank: %.3f kg", total_weight);
+            format_line(lines[1], "Gas: %.3f/%.3fkg", dispensed, target_kg);
+            format_line(lines[2], "Done: %3.0f%%", percent);
             if (state == STATE_PAUSED) {
-                format_line(lines[3], "Total: %.2fkg PAUSED", total_weight);
+                format_line(lines[3], "Start %.3f PAUSED", initial_mass);
             } else {
-                format_line(lines[3], "Total: %.2f kg", total_weight);
+                format_line(lines[3], "Start: %.3f kg", initial_mass);
             }
             break;
 

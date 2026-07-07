@@ -32,8 +32,10 @@ static float s_target_kg = 0.0f;
 static float s_initial_mass_kg = 0.0f;
 static float s_already_dispensed_kg = 0.0f;
 static bool s_safety_monitoring_armed = false;
-static bool s_dispense_baseline_ready = false;
 static uint32_t s_safety_enable_ms = 0;
+static uint8_t s_target_hit_count = 0;
+static bool s_display_dirty = true;
+static uint32_t s_last_display_ms = 0;
 
 static char s_price_buffer[16] = {0};
 static uint8_t s_price_len = 0;
@@ -61,6 +63,10 @@ static bool target_reached(float dispensed_kg) {
     return s_target_kg > 0.0f && (dispensed_kg + tolerance) >= s_target_kg;
 }
 
+static void mark_display_dirty(void) {
+    s_display_dirty = true;
+}
+
 esp_err_t statemachine_init(void) {
     s_price_per_kg = loadcell_get_price_per_kg();
     BaseType_t res = xTaskCreate(statemachine_task, "statemachine", 4096, NULL, 2, &s_state_task_handle);
@@ -76,6 +82,7 @@ void statemachine_set_state(system_state_t new_state) {
     s_previous_state = s_current_state;
     ESP_LOGI(TAG, "State transition: %d -> %d", s_current_state, new_state);
     s_current_state = new_state;
+    mark_display_dirty();
 
     switch (new_state) {
         case STATE_IDLE:
@@ -83,15 +90,18 @@ void statemachine_set_state(system_state_t new_state) {
             safety_set_monitoring(false);
             safety_clear_trigger();
             s_safety_monitoring_armed = false;
-            s_dispense_baseline_ready = false;
+            s_target_hit_count = 0;
             break;
         case STATE_PRICE_ENTRY:
             memset(s_price_buffer, 0, sizeof(s_price_buffer));
             s_price_len = 0;
             s_paid_amount = 0.0f;
             s_target_kg = 0.0f;
+            s_target_hit_count = 0;
             break;
         case STATE_READY:
+            s_initial_mass_kg = loadcell_get_latest_kg();
+            s_target_hit_count = 0;
             break;
         case STATE_DISPENSING:
             if (!loadcell_has_fresh_reading(LOADCELL_STALE_TIMEOUT_MS)) {
@@ -105,9 +115,9 @@ void statemachine_set_state(system_state_t new_state) {
                 s_initial_mass_kg = loadcell_get_latest_kg();
                 s_already_dispensed_kg = 0.0f;
             }
+            s_target_hit_count = 0;
             relay_on();
             s_safety_monitoring_armed = false;
-            s_dispense_baseline_ready = false;
             s_safety_enable_ms = now_ms() + RELAY_SETTLE_MS;
             break;
         case STATE_PAUSED:
@@ -119,19 +129,19 @@ void statemachine_set_state(system_state_t new_state) {
             relay_off();
             safety_set_monitoring(false);
             s_safety_monitoring_armed = false;
-            s_dispense_baseline_ready = false;
+            s_target_hit_count = 0;
             break;
         case STATE_SAFETY_STOP:
             relay_off();
             safety_set_monitoring(false);
             s_safety_monitoring_armed = false;
-            s_dispense_baseline_ready = false;
+            s_target_hit_count = 0;
             break;
         case STATE_CALIBRATION:
             relay_off();
             safety_set_monitoring(false);
             s_safety_monitoring_armed = false;
-            s_dispense_baseline_ready = false;
+            s_target_hit_count = 0;
             break;
     }
 }
@@ -169,7 +179,10 @@ static void process_keypad(void) {
     while (keypad_get_key(&key)) {
         if (s_current_state == STATE_PRICE_ENTRY) {
             if (key >= '0' && key <= '9') {
-                if (s_price_len < 15) s_price_buffer[s_price_len++] = key;
+                if (s_price_len < 15) {
+                    s_price_buffer[s_price_len++] = key;
+                    mark_display_dirty();
+                }
             } else if (key == KEYPAD_ENTER_KEY) {
                 s_paid_amount = atof(s_price_buffer);
                 s_price_per_kg = loadcell_get_price_per_kg();
@@ -180,13 +193,16 @@ static void process_keypad(void) {
                     ESP_LOGW(TAG, "Invalid price entry: %s", s_price_buffer);
                     memset(s_price_buffer, 0, sizeof(s_price_buffer));
                     s_price_len = 0;
+                    mark_display_dirty();
                 }
             } else if (key == KEYPAD_CLEAR_KEY) {
                 memset(s_price_buffer, 0, sizeof(s_price_buffer));
                 s_price_len = 0;
+                mark_display_dirty();
             }
         } else if (s_current_state == STATE_CALIBRATION) {
             display_manager_calibration_key(key);
+            mark_display_dirty();
         }
     }
 }
@@ -204,21 +220,18 @@ static void state_dispensing_handler(void) {
     }
 
     float current_mass = loadcell_get_latest_kg();
-    if (!s_dispense_baseline_ready) {
-        s_initial_mass_kg = current_mass;
-        s_dispense_baseline_ready = true;
-        return;
-    }
-
     float dispensed_kg = calculate_dispensed(current_mass);
     if (target_reached(dispensed_kg)) {
-        relay_off();
-        safety_set_monitoring(false);
-        s_safety_monitoring_armed = false;
-        s_dispense_baseline_ready = false;
-        statemachine_set_state(STATE_IDLE);
-        ESP_LOGI(TAG, "Dispensing complete: %.2f / %.2f kg", dispensed_kg, s_target_kg);
-        return;
+        if (++s_target_hit_count >= DISPENSE_STOP_CONFIRM_COUNT) {
+            relay_off();
+            safety_set_monitoring(false);
+            s_safety_monitoring_armed = false;
+            statemachine_set_state(STATE_IDLE);
+            ESP_LOGI(TAG, "Dispensing complete: %.3f / %.3f kg", dispensed_kg, s_target_kg);
+            return;
+        }
+    } else {
+        s_target_hit_count = 0;
     }
 }
 
@@ -232,23 +245,27 @@ void statemachine_task(void *pvParameters) {
             if (!s_safety_monitoring_armed && (int32_t)(now_ms() - s_safety_enable_ms) >= 0) {
                 safety_set_monitoring(true);
                 s_safety_monitoring_armed = true;
-                s_dispense_baseline_ready = false;
             }
-            if (s_safety_monitoring_armed) {
-                state_dispensing_handler();
-            }
+            state_dispensing_handler();
         }
-        update_display();
+        if (s_display_dirty || (uint32_t)(now_ms() - s_last_display_ms) >= LCD_DYNAMIC_UPDATE_MS) {
+            update_display();
+            s_display_dirty = false;
+            s_last_display_ms = now_ms();
+        }
     }
 }
 
 static void update_display(void) {
-    float empty_mass = 0.0f;   // no hardcoded 12 kg
+    float initial_mass = s_initial_mass_kg;
     float paid = s_paid_amount;
     float dispensed = 0.0f;
     float total_weight = loadcell_get_latest_kg();
-    if (s_current_state == STATE_DISPENSING || s_current_state == STATE_PAUSED) {
-        dispensed = s_dispense_baseline_ready ? calculate_dispensed(total_weight) : s_already_dispensed_kg;
+    if (s_current_state == STATE_READY) {
+        initial_mass = total_weight;
     }
-    display_manager_update(s_current_state, empty_mass, paid, dispensed, total_weight, s_price_buffer, s_price_len);
+    if (s_current_state == STATE_DISPENSING || s_current_state == STATE_PAUSED) {
+        dispensed = calculate_dispensed(total_weight);
+    }
+    display_manager_update(s_current_state, initial_mass, paid, dispensed, total_weight, s_price_buffer, s_price_len);
 }
