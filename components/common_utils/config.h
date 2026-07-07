@@ -9,8 +9,8 @@
 #define LOADCELL_SCK_GPIO          6
 #define LOADCELL_MAX_KG            20.0f
 #define LOADCELL_DEFAULT_ZERO      0.0f
-#define LOADCELL_BACKGROUND_SAMPLES 5
-#define LOADCELL_BACKGROUND_INTERVAL_MS 50
+#define LOADCELL_BACKGROUND_SAMPLES 3
+#define LOADCELL_BACKGROUND_INTERVAL_MS 20
 #define LOADCELL_STALE_TIMEOUT_MS  2000
 
 // Pre‑determined scale factor from calibration with 229g = 0.229 kg
@@ -58,6 +58,8 @@
 // ==================== Dispensing ====================
 #define DEFAULT_PRICE_PER_KG       2500.0f
 #define TARE_WEIGHT_DEFAULT_KG     0.0f
+#define DISPENSE_MASS_DECREASES    1
+#define DISPENSE_STOP_TOLERANCE_KG 0.002f
 #define STATE_MACHINE_INTERVAL_MS  50
 #define RELAY_SETTLE_MS            600
 

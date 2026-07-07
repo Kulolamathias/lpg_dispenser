@@ -141,7 +141,7 @@ void display_manager_update(system_state_t state, float empty_mass, float paid,
         case STATE_PAUSED:
             format_line(lines[0], "Empty: %.2f kg", empty_mass);
             format_line(lines[1], "Paid: TSHs %.2f", paid);
-            format_line(lines[2], "Disp: %.2f/%.2fkg", dispensed, paid / loadcell_get_price_per_kg());
+            format_line(lines[2], "Disp: %.3f/%.3fkg", dispensed, paid / loadcell_get_price_per_kg());
             if (state == STATE_PAUSED) {
                 format_line(lines[3], "Total: %.2fkg PAUSED", total_weight);
             } else {

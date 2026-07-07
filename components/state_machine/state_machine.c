@@ -11,6 +11,7 @@
 #include "safety.h"
 #include "display_manager.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -31,6 +32,7 @@ static float s_target_kg = 0.0f;
 static float s_initial_mass_kg = 0.0f;
 static float s_already_dispensed_kg = 0.0f;
 static bool s_safety_monitoring_armed = false;
+static bool s_dispense_baseline_ready = false;
 static uint32_t s_safety_enable_ms = 0;
 
 static char s_price_buffer[16] = {0};
@@ -46,8 +48,17 @@ static inline uint32_t now_ms(void) {
 }
 
 static float calculate_dispensed(float current_mass) {
+#if DISPENSE_MASS_DECREASES
     float dispensed = (s_initial_mass_kg - current_mass) + s_already_dispensed_kg;
+#else
+    float dispensed = (current_mass - s_initial_mass_kg) + s_already_dispensed_kg;
+#endif
     return dispensed > 0.0f ? dispensed : 0.0f;
+}
+
+static bool target_reached(float dispensed_kg) {
+    float tolerance = fminf(DISPENSE_STOP_TOLERANCE_KG, s_target_kg * 0.05f);
+    return s_target_kg > 0.0f && (dispensed_kg + tolerance) >= s_target_kg;
 }
 
 esp_err_t statemachine_init(void) {
@@ -72,6 +83,7 @@ void statemachine_set_state(system_state_t new_state) {
             safety_set_monitoring(false);
             safety_clear_trigger();
             s_safety_monitoring_armed = false;
+            s_dispense_baseline_ready = false;
             break;
         case STATE_PRICE_ENTRY:
             memset(s_price_buffer, 0, sizeof(s_price_buffer));
@@ -95,6 +107,7 @@ void statemachine_set_state(system_state_t new_state) {
             }
             relay_on();
             s_safety_monitoring_armed = false;
+            s_dispense_baseline_ready = false;
             s_safety_enable_ms = now_ms() + RELAY_SETTLE_MS;
             break;
         case STATE_PAUSED:
@@ -106,16 +119,19 @@ void statemachine_set_state(system_state_t new_state) {
             relay_off();
             safety_set_monitoring(false);
             s_safety_monitoring_armed = false;
+            s_dispense_baseline_ready = false;
             break;
         case STATE_SAFETY_STOP:
             relay_off();
             safety_set_monitoring(false);
             s_safety_monitoring_armed = false;
+            s_dispense_baseline_ready = false;
             break;
         case STATE_CALIBRATION:
             relay_off();
             safety_set_monitoring(false);
             s_safety_monitoring_armed = false;
+            s_dispense_baseline_ready = false;
             break;
     }
 }
@@ -188,8 +204,18 @@ static void state_dispensing_handler(void) {
     }
 
     float current_mass = loadcell_get_latest_kg();
+    if (!s_dispense_baseline_ready) {
+        s_initial_mass_kg = current_mass;
+        s_dispense_baseline_ready = true;
+        return;
+    }
+
     float dispensed_kg = calculate_dispensed(current_mass);
-    if (dispensed_kg >= s_target_kg) {
+    if (target_reached(dispensed_kg)) {
+        relay_off();
+        safety_set_monitoring(false);
+        s_safety_monitoring_armed = false;
+        s_dispense_baseline_ready = false;
         statemachine_set_state(STATE_IDLE);
         ESP_LOGI(TAG, "Dispensing complete: %.2f / %.2f kg", dispensed_kg, s_target_kg);
         return;
@@ -206,8 +232,11 @@ void statemachine_task(void *pvParameters) {
             if (!s_safety_monitoring_armed && (int32_t)(now_ms() - s_safety_enable_ms) >= 0) {
                 safety_set_monitoring(true);
                 s_safety_monitoring_armed = true;
+                s_dispense_baseline_ready = false;
             }
-            state_dispensing_handler();
+            if (s_safety_monitoring_armed) {
+                state_dispensing_handler();
+            }
         }
         update_display();
     }
@@ -219,7 +248,7 @@ static void update_display(void) {
     float dispensed = 0.0f;
     float total_weight = loadcell_get_latest_kg();
     if (s_current_state == STATE_DISPENSING || s_current_state == STATE_PAUSED) {
-        dispensed = calculate_dispensed(total_weight);
+        dispensed = s_dispense_baseline_ready ? calculate_dispensed(total_weight) : s_already_dispensed_kg;
     }
     display_manager_update(s_current_state, empty_mass, paid, dispensed, total_weight, s_price_buffer, s_price_len);
 }
