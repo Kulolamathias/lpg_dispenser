@@ -10,6 +10,9 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdarg.h>
+#include <stdlib.h>
+#include "esp_err.h"
 #include "esp_log.h"
 
 static const char *TAG = "DISPLAY_MGR";
@@ -24,12 +27,51 @@ typedef enum {
     CALIB_SAVE
 } calib_step_t;
 static calib_step_t s_calib_step = CALIB_NONE;
-static float s_calib_known_mass = 0.0f;
 static char s_calib_buffer[16] = {0};
 static uint8_t s_calib_len = 0;
+static char s_last_lines[LCD_ROWS][LCD_COLS + 1] = {{0}};
+static bool s_screen_valid = false;
+static system_state_t s_last_state = (system_state_t)-1;
+static calib_step_t s_last_calib_step = CALIB_NONE;
 
 // Forward declaration
-static void display_manager_calibration_draw(void);
+static void display_manager_calibration_lines(char lines[LCD_ROWS][LCD_COLS + 1]);
+
+static void format_line(char dest[LCD_COLS + 1], const char *fmt, ...) {
+    char buffer[96];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+
+    memset(dest, ' ', LCD_COLS);
+    size_t len = strlen(buffer);
+    if (len > LCD_COLS) len = LCD_COLS;
+    memcpy(dest, buffer, len);
+    dest[LCD_COLS] = '\0';
+}
+
+static void write_lines(system_state_t state, char lines[LCD_ROWS][LCD_COLS + 1]) {
+    if (!s_lcd) return;
+
+    if (!s_screen_valid || state != s_last_state ||
+        (state == STATE_CALIBRATION && s_calib_step != s_last_calib_step)) {
+        lcd_clear(s_lcd);
+        memset(s_last_lines, 0, sizeof(s_last_lines));
+        s_screen_valid = false;
+        s_last_state = state;
+        s_last_calib_step = s_calib_step;
+    }
+
+    for (uint8_t row = 0; row < LCD_ROWS; row++) {
+        if (!s_screen_valid || memcmp(s_last_lines[row], lines[row], LCD_COLS) != 0) {
+            lcd_set_cursor(s_lcd, row, 0);
+            lcd_print_str(s_lcd, lines[row]);
+            memcpy(s_last_lines[row], lines[row], LCD_COLS + 1);
+        }
+    }
+    s_screen_valid = true;
+}
 
 esp_err_t display_manager_init(void) {
     // Initialize I2C (if not already done by LCD driver)
@@ -60,6 +102,8 @@ esp_err_t display_manager_init(void) {
         return ESP_ERR_NOT_FOUND;
     }
     lcd_clear(s_lcd);
+    memset(s_last_lines, 0, sizeof(s_last_lines));
+    s_screen_valid = false;
     ESP_LOGI(TAG, "Display manager initialized");
     return ESP_OK;
 }
@@ -68,125 +112,95 @@ void display_manager_update(system_state_t state, float empty_mass, float paid,
                             float dispensed, float total_weight, 
                             const char *price_buffer, uint8_t price_len) {
     if (!s_lcd) return;
-
-    lcd_clear(s_lcd);
+    (void)price_len;
+    char lines[LCD_ROWS][LCD_COLS + 1];
 
     switch (state) {
         case STATE_IDLE:
-            lcd_set_cursor(s_lcd, 0, 0);
-            lcd_print_str(s_lcd, "LPG Dispenser Ready");
-            lcd_set_cursor(s_lcd, 1, 0);
-            lcd_print_str(s_lcd, "Press Start for TSHs");
-            lcd_set_cursor(s_lcd, 2, 0);
-            lcd_printf(s_lcd, "Price/kg: %.2f", loadcell_get_price_per_kg());
-            lcd_set_cursor(s_lcd, 3, 0);
-            lcd_print_str(s_lcd, "Mode=Calibration");
+            format_line(lines[0], "LPG Dispenser Ready");
+            format_line(lines[1], "Press Start for TSHs");
+            format_line(lines[2], "Price/kg: %.2f", loadcell_get_price_per_kg());
+            format_line(lines[3], "Mode=Calibration");
             break;
 
         case STATE_PRICE_ENTRY:
-            lcd_set_cursor(s_lcd, 0, 0);
-            lcd_print_str(s_lcd, "Enter Amount:");
-            lcd_set_cursor(s_lcd, 1, 0);
-            lcd_printf(s_lcd, "TSHs %s", price_buffer);
-            lcd_set_cursor(s_lcd, 2, 0);
-            lcd_print_str(s_lcd, "Press # to confirm");
-            lcd_set_cursor(s_lcd, 3, 0);
-            lcd_print_str(s_lcd, "* to clear");
+            format_line(lines[0], "Enter Amount:");
+            format_line(lines[1], "TSHs %s", price_buffer);
+            format_line(lines[2], "Press # to confirm");
+            format_line(lines[3], "* to clear");
             break;
 
         case STATE_READY:
-            lcd_set_cursor(s_lcd, 0, 0);
-            lcd_printf(s_lcd, "Paid: TSHs %.2f", paid);
-            lcd_set_cursor(s_lcd, 1, 0);
-            lcd_printf(s_lcd, "Target: %.2f kg", paid / loadcell_get_price_per_kg());
-            lcd_set_cursor(s_lcd, 2, 0);
-            lcd_print_str(s_lcd, "Press Start");
-            lcd_set_cursor(s_lcd, 3, 0);
-            lcd_print_str(s_lcd, "Stop/Pause, Reset=abort");
+            format_line(lines[0], "Paid: TSHs %.2f", paid);
+            format_line(lines[1], "Target: %.2f kg", paid / loadcell_get_price_per_kg());
+            format_line(lines[2], "Press Start");
+            format_line(lines[3], "Stop/Pause Reset");
             break;
 
         case STATE_DISPENSING:
         case STATE_PAUSED:
-            lcd_set_cursor(s_lcd, 0, 0);
-            lcd_printf(s_lcd, "Empty: %.2f kg", empty_mass);
-            lcd_set_cursor(s_lcd, 1, 0);
-            lcd_printf(s_lcd, "Paid: TSHs %.2f", paid);
-            lcd_set_cursor(s_lcd, 2, 0);
-            lcd_printf(s_lcd, "Disp: %.2f / %.2f kg", dispensed, paid / loadcell_get_price_per_kg());
-            lcd_set_cursor(s_lcd, 3, 0);
-            lcd_printf(s_lcd, "Total: %.2f kg", total_weight);
+            format_line(lines[0], "Empty: %.2f kg", empty_mass);
+            format_line(lines[1], "Paid: TSHs %.2f", paid);
+            format_line(lines[2], "Disp: %.2f/%.2fkg", dispensed, paid / loadcell_get_price_per_kg());
             if (state == STATE_PAUSED) {
-                lcd_set_cursor(s_lcd, 3, 15);
-                lcd_print_str(s_lcd, "PAUSED");
+                format_line(lines[3], "Total: %.2fkg PAUSED", total_weight);
+            } else {
+                format_line(lines[3], "Total: %.2f kg", total_weight);
             }
             break;
 
         case STATE_SAFETY_STOP:
-            lcd_set_cursor(s_lcd, 0, 0);
-            lcd_print_str(s_lcd, "!!! SAFETY STOP !!!");
-            lcd_set_cursor(s_lcd, 1, 0);
-            lcd_print_str(s_lcd, "Mass drop detected");
-            lcd_set_cursor(s_lcd, 2, 0);
-            lcd_print_str(s_lcd, "Press Reset");
-            lcd_set_cursor(s_lcd, 3, 0);
-            lcd_print_str(s_lcd, "to continue");
+            format_line(lines[0], "!!! SAFETY STOP !!!");
+            format_line(lines[1], "Mass/drop or sensor");
+            format_line(lines[2], "Press Reset");
+            format_line(lines[3], "to continue");
             break;
 
         case STATE_CALIBRATION:
-            display_manager_calibration_draw();
+            display_manager_calibration_lines(lines);
             break;
 
         default:
+            format_line(lines[0], "");
+            format_line(lines[1], "");
+            format_line(lines[2], "");
+            format_line(lines[3], "");
             break;
     }
+    write_lines(state, lines);
 }
 
-static void display_manager_calibration_draw(void) {
-    lcd_clear(s_lcd);
+static void display_manager_calibration_lines(char lines[LCD_ROWS][LCD_COLS + 1]) {
     switch (s_calib_step) {
         case CALIB_ZERO:
-            lcd_set_cursor(s_lcd, 0, 0);
-            lcd_print_str(s_lcd, "Calib: Zero Offset");
-            lcd_set_cursor(s_lcd, 1, 0);
-            lcd_print_str(s_lcd, "Remove all weight");
-            lcd_set_cursor(s_lcd, 2, 0);
-            lcd_print_str(s_lcd, "Press # to set zero");
-            lcd_set_cursor(s_lcd, 3, 0);
-            lcd_printf(s_lcd, "Current: %.2f kg", loadcell_read_kg());
+            format_line(lines[0], "Calib: Zero Offset");
+            format_line(lines[1], "Remove all weight");
+            format_line(lines[2], "Press # set zero");
+            format_line(lines[3], "Current: %.2f kg", loadcell_get_latest_kg());
             break;
         case CALIB_KNOWN_MASS:
-            lcd_set_cursor(s_lcd, 0, 0);
-            lcd_print_str(s_lcd, "Calib: Known Mass");
-            lcd_set_cursor(s_lcd, 1, 0);
-            lcd_printf(s_lcd, "Enter mass (g): %s", s_calib_buffer);
-            lcd_set_cursor(s_lcd, 2, 0);
-            lcd_print_str(s_lcd, "Place mass & #");
-            lcd_set_cursor(s_lcd, 3, 0);
-            lcd_print_str(s_lcd, "* clear, D=skip");
+            format_line(lines[0], "Calib: Known Mass");
+            format_line(lines[1], "Mass(g): %s", s_calib_buffer);
+            format_line(lines[2], "Place mass & #");
+            format_line(lines[3], "* clear, D=skip");
             break;
         case CALIB_PRICE:
-            lcd_set_cursor(s_lcd, 0, 0);
-            lcd_print_str(s_lcd, "Set Price per kg");
-            lcd_set_cursor(s_lcd, 1, 0);
-            lcd_printf(s_lcd, "Current: %.2f", loadcell_get_price_per_kg());
-            lcd_set_cursor(s_lcd, 2, 0);
-            lcd_printf(s_lcd, "New: %s", s_calib_buffer);
-            lcd_set_cursor(s_lcd, 3, 0);
-            lcd_print_str(s_lcd, "# save, * clear, D skip");
+            format_line(lines[0], "Set Price per kg");
+            format_line(lines[1], "Current: %.2f", loadcell_get_price_per_kg());
+            format_line(lines[2], "New: %s", s_calib_buffer);
+            format_line(lines[3], "# save * clear D");
             break;
         case CALIB_SAVE:
-            lcd_set_cursor(s_lcd, 0, 0);
-            lcd_print_str(s_lcd, "Save calibration?");
-            lcd_set_cursor(s_lcd, 1, 0);
-            lcd_print_str(s_lcd, "# = Yes  * = No");
+            format_line(lines[0], "Save calibration?");
+            format_line(lines[1], "# = Yes  * = No");
+            format_line(lines[2], "");
+            format_line(lines[3], "");
             break;
         default:
-            lcd_set_cursor(s_lcd, 0, 0);
-            lcd_print_str(s_lcd, "Calibration Menu");
-            lcd_set_cursor(s_lcd, 1, 0);
-            lcd_print_str(s_lcd, "# Start");
-            lcd_set_cursor(s_lcd, 2, 0);
-            lcd_print_str(s_lcd, "D to exit");
+            format_line(lines[0], "Calibration Menu");
+            format_line(lines[1], "# Start");
+            format_line(lines[2], "D to exit");
+            format_line(lines[3], "");
             break;
     }
 }
@@ -246,7 +260,12 @@ void display_manager_calibration_key(char key) {
         }
     } else if (s_calib_step == CALIB_SAVE) {
         if (key == '#') {
-            loadcell_save_calibration();
+            esp_err_t err = loadcell_save_calibration();
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "Calibration saved to NVS");
+            } else {
+                ESP_LOGE(TAG, "Calibration save failed: %s", esp_err_to_name(err));
+            }
             s_calib_step = CALIB_NONE;
             statemachine_set_state(STATE_IDLE);
         } else if (key == '*') {

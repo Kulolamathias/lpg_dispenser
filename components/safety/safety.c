@@ -101,11 +101,18 @@ static void safety_task(void *pvParameters) {
 
         // If monitoring just enabled, reset baseline
         if (s_monitoring_enabled && !prev_monitoring) {
-            prev_mass = loadcell_read_kg() * 1000;  // convert to grams
+            prev_mass = loadcell_get_latest_kg() * 1000;  // convert to grams
         }
 
         if (s_monitoring_enabled && !s_safety_triggered) {
-            float current_mass_g = loadcell_read_kg() * 1000;
+            if (!loadcell_has_fresh_reading(LOADCELL_STALE_TIMEOUT_MS)) {
+                ESP_LOGW(TAG, "Load-cell reading stale during safety monitoring");
+                safety_trigger();
+                prev_monitoring = s_monitoring_enabled;
+                continue;
+            }
+
+            float current_mass_g = loadcell_get_latest_kg() * 1000;
 
             // Only monitor if mass is above minimum threshold (tank present)
             if (current_mass_g > SAFETY_MIN_MASS_TO_MONITOR_GRAMS) {

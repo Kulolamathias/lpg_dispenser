@@ -59,14 +59,13 @@ static void button_process_task(void *pvParameters) {
             vTaskDelay(pdMS_TO_TICKS(BTN_DEBOUNCE_MS));
             if (gpio_get_level(gpio_num) == 0) {
                 press_time = esp_timer_get_time();
-                if (gpio_num == BTN_RESET_GPIO && !s_reset_pressed) {
-                    s_reset_pressed = true;
-                    esp_timer_start_once(s_long_press_timer, BTN_RESET_LONG_PRESS_MS * 1000);
-                }
-                while (gpio_get_level(gpio_num) == 0) vTaskDelay(pdMS_TO_TICKS(10));
-                uint64_t duration_ms = (esp_timer_get_time() - press_time) / 1000;
-
                 if (gpio_num == BTN_RESET_GPIO) {
+                    if (!s_reset_pressed) {
+                        s_reset_pressed = true;
+                        esp_timer_start_once(s_long_press_timer, BTN_RESET_LONG_PRESS_MS * 1000);
+                    }
+                    while (gpio_get_level(gpio_num) == 0) vTaskDelay(pdMS_TO_TICKS(10));
+                    uint64_t duration_ms = (esp_timer_get_time() - press_time) / 1000;
                     esp_timer_stop(s_long_press_timer);
                     s_reset_pressed = false;
                     if (duration_ms < BTN_RESET_LONG_PRESS_MS) {
@@ -80,6 +79,7 @@ static void button_process_task(void *pvParameters) {
                             break;
                         }
                     }
+                    while (gpio_get_level(gpio_num) == 0) vTaskDelay(pdMS_TO_TICKS(10));
                 }
             }
         }

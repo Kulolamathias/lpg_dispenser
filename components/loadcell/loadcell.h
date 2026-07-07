@@ -27,6 +27,19 @@ esp_err_t loadcell_init(void);
 float loadcell_read_kg(void);
 
 /**
+ * @brief Get the latest background-sampled mass immediately
+ * @return most recent mass in kg, or 0.0f before the first valid sample
+ */
+float loadcell_get_latest_kg(void);
+
+/**
+ * @brief Check whether the cached mass has been refreshed recently
+ * @param max_age_ms Maximum accepted cache age in milliseconds
+ * @return true when a valid reading newer than max_age_ms is available
+ */
+bool loadcell_has_fresh_reading(uint32_t max_age_ms);
+
+/**
  * @brief Set current reading as zero offset (tare)
  * @return ESP_OK on success
  */

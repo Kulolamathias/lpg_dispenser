@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "esp_log.h"
 #include "driver/gpio.h"
 #include "esp_timer.h"
@@ -25,10 +26,25 @@ static float s_price_per_kg = DEFAULT_PRICE_PER_KG;
 
 static int32_t s_last_valid_raw = 0;
 static uint32_t s_timeout_count = 0;
+static SemaphoreHandle_t s_hx711_mutex = NULL;
+static TaskHandle_t s_loadcell_task_handle = NULL;
+static portMUX_TYPE s_cache_lock = portMUX_INITIALIZER_UNLOCKED;
+static float s_cached_kg = 0.0f;
+static uint32_t s_cached_update_ms = 0;
+static bool s_cached_valid = false;
 
 /* ---- Hardware helpers ---- */
 static inline void sck_high(void) { gpio_set_level(LOADCELL_SCK_GPIO, 1); }
 static inline void sck_low(void)  { gpio_set_level(LOADCELL_SCK_GPIO, 0); }
+static inline uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000ULL); }
+
+static void update_cached_kg(float kg) {
+    portENTER_CRITICAL(&s_cache_lock);
+    s_cached_kg = kg;
+    s_cached_update_ms = now_ms();
+    s_cached_valid = true;
+    portEXIT_CRITICAL(&s_cache_lock);
+}
 
 /* ---- Reset HX711 by pulsing SCK 36 times ---- */
 static void hx711_reset(void) {
@@ -65,8 +81,8 @@ static esp_err_t wait_for_dt(uint32_t timeout_ms) {
     return ESP_OK;
 }
 
-/* ---- Raw read (single sample) with retry ---- */
-int32_t loadcell_read_raw(void) {
+/* ---- Raw read (single sample) with retry; caller must hold s_hx711_mutex ---- */
+static int32_t loadcell_read_raw_unlocked(void) {
     for (int retry = 0; retry < 3; retry++) {
         if (wait_for_dt(500) == ESP_OK) {
             int32_t value = 0;
@@ -87,6 +103,16 @@ int32_t loadcell_read_raw(void) {
     return 0;
 }
 
+/* ---- Raw read (single sample) with retry ---- */
+int32_t loadcell_read_raw(void) {
+    if (!s_hx711_mutex || xSemaphoreTake(s_hx711_mutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
+        return 0;
+    }
+    int32_t raw = loadcell_read_raw_unlocked();
+    xSemaphoreGive(s_hx711_mutex);
+    return raw;
+}
+
 /* ---- Comparison for qsort ---- */
 static int cmp_int32(const void *a, const void *b) {
     int32_t ia = *(const int32_t*)a;
@@ -94,28 +120,27 @@ static int cmp_int32(const void *a, const void *b) {
     return (ia > ib) - (ia < ib);
 }
 
-/* ---- Outlier‑rejected mass reading ---- */
-float loadcell_read_kg(void) {
-    const int N = 30;   // reduced to speed up recovery
-    int32_t samples[N];
+/* ---- Outlier-rejected mass reading; caller must hold s_hx711_mutex ---- */
+static bool read_kg_samples_unlocked(uint8_t sample_count, uint8_t min_valid_count, float *kg_out) {
+    if (sample_count > 30) sample_count = 30;
+    int32_t samples[30];
     int count = 0;
-    for (int i = 0; i < N; i++) {
-        int32_t raw = loadcell_read_raw();
+    for (int i = 0; i < sample_count; i++) {
+        int32_t raw = loadcell_read_raw_unlocked();
         if (raw != 0) samples[count++] = raw;
         vTaskDelay(pdMS_TO_TICKS(5));
     }
-    if (count < 10) {
+    if (count < min_valid_count) {
         ESP_LOGW(TAG, "Too few valid samples");
-        return 0.0f;
+        return false;
     }
 
     qsort(samples, count, sizeof(int32_t), cmp_int32);
 
-    int trim = count / 10;
-    if (trim < 1) trim = 1;
+    int trim = (count >= 10) ? (count / 10) : 0;
     int start = trim;
     int end = count - trim;
-    int32_t sum = 0;
+    int64_t sum = 0;
     for (int i = start; i < end; i++) {
         sum += samples[i];
     }
@@ -142,20 +167,69 @@ float loadcell_read_kg(void) {
     if (dbg_cnt++ % 20 == 0) {
         ESP_LOGI(TAG, "raw=%ld  zero=%.1f  slope=%f  kg=%.3f", raw_avg, s_zero_offset, s_slope, kg);
     }
+    *kg_out = kg;
+    return true;
+}
+
+static float read_kg_samples(uint8_t sample_count, uint8_t min_valid_count) {
+    if (!s_hx711_mutex || xSemaphoreTake(s_hx711_mutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
+        return loadcell_get_latest_kg();
+    }
+    float kg = 0.0f;
+    bool ok = read_kg_samples_unlocked(sample_count, min_valid_count, &kg);
+    xSemaphoreGive(s_hx711_mutex);
+    if (ok) {
+        update_cached_kg(kg);
+    }
+    return ok ? kg : loadcell_get_latest_kg();
+}
+
+/* ---- Outlier-rejected mass reading ---- */
+float loadcell_read_kg(void) {
+    return read_kg_samples(30, 10);
+}
+
+float loadcell_get_latest_kg(void) {
+    float kg;
+    portENTER_CRITICAL(&s_cache_lock);
+    kg = s_cached_kg;
+    portEXIT_CRITICAL(&s_cache_lock);
     return kg;
+}
+
+bool loadcell_has_fresh_reading(uint32_t max_age_ms) {
+    bool valid;
+    uint32_t update_ms;
+    portENTER_CRITICAL(&s_cache_lock);
+    valid = s_cached_valid;
+    update_ms = s_cached_update_ms;
+    portEXIT_CRITICAL(&s_cache_lock);
+    return valid && ((uint32_t)(now_ms() - update_ms) <= max_age_ms);
+}
+
+static void loadcell_sample_task(void *pvParameters) {
+    while (1) {
+        (void)read_kg_samples(LOADCELL_BACKGROUND_SAMPLES, 2);
+        vTaskDelay(pdMS_TO_TICKS(LOADCELL_BACKGROUND_INTERVAL_MS));
+    }
 }
 
 /* ---- Zero calibration ---- */
 esp_err_t loadcell_set_zero(void) {
     ESP_LOGI(TAG, "Setting zero offset...");
-    int32_t sum = 0;
+    if (!s_hx711_mutex || xSemaphoreTake(s_hx711_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    int64_t sum = 0;
     for (int i = 0; i < 30; i++) {
-        sum += loadcell_read_raw();
+        sum += loadcell_read_raw_unlocked();
         vTaskDelay(pdMS_TO_TICKS(20));
     }
     s_zero_offset = sum / 30.0f;
     ESP_LOGI(TAG, "Zero offset = %.1f", s_zero_offset);
     s_last_valid_raw = (int32_t)s_zero_offset;
+    xSemaphoreGive(s_hx711_mutex);
+    update_cached_kg(0.0f);
     return ESP_OK;
 }
 
@@ -165,9 +239,12 @@ esp_err_t loadcell_calibrate(float known_kg) {
         ESP_LOGE(TAG, "Invalid known mass: %.2f kg", known_kg);
         return ESP_ERR_INVALID_ARG;
     }
-    int32_t sum = 0;
+    if (!s_hx711_mutex || xSemaphoreTake(s_hx711_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    int64_t sum = 0;
     for (int i = 0; i < 30; i++) {
-        sum += loadcell_read_raw();
+        sum += loadcell_read_raw_unlocked();
         vTaskDelay(pdMS_TO_TICKS(20));
     }
     float raw_with_mass = sum / 30.0f;
@@ -178,10 +255,13 @@ esp_err_t loadcell_calibrate(float known_kg) {
     }
     if (fabs(delta_raw) < 5.0f) {
         ESP_LOGE(TAG, "Delta raw too small (%.1f)", delta_raw);
+        xSemaphoreGive(s_hx711_mutex);
         return ESP_ERR_INVALID_RESPONSE;
     }
     s_slope = known_kg / delta_raw;
     ESP_LOGI(TAG, "Calibration: known_kg=%.3f, delta_raw=%.1f, slope=%f", known_kg, delta_raw, s_slope);
+    xSemaphoreGive(s_hx711_mutex);
+    (void)read_kg_samples(LOADCELL_BACKGROUND_SAMPLES, 2);
     return ESP_OK;
 }
 
@@ -222,6 +302,13 @@ esp_err_t loadcell_load_calibration(void) {
 
 /* ---- Init ---- */
 esp_err_t loadcell_init(void) {
+    if (!s_hx711_mutex) {
+        s_hx711_mutex = xSemaphoreCreateMutex();
+        if (!s_hx711_mutex) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << LOADCELL_DT_GPIO),
         .mode = GPIO_MODE_INPUT,
@@ -237,6 +324,12 @@ esp_err_t loadcell_init(void) {
     vTaskDelay(pdMS_TO_TICKS(100));
     loadcell_load_calibration();
     s_last_valid_raw = 0;
+    if (!s_loadcell_task_handle) {
+        BaseType_t res = xTaskCreate(loadcell_sample_task, "loadcell_sample", 4096, NULL, 2, &s_loadcell_task_handle);
+        if (res != pdPASS) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
     ESP_LOGI(TAG, "HX711 initialized with slope=%.6f", s_slope);
     return ESP_OK;
 }

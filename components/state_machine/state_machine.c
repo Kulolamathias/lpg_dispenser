@@ -17,6 +17,7 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 static const char *TAG = "STATEMACHINE";
 
@@ -29,6 +30,8 @@ static float s_price_per_kg = 0.0f;
 static float s_target_kg = 0.0f;
 static float s_initial_mass_kg = 0.0f;
 static float s_already_dispensed_kg = 0.0f;
+static bool s_safety_monitoring_armed = false;
+static uint32_t s_safety_enable_ms = 0;
 
 static char s_price_buffer[16] = {0};
 static uint8_t s_price_len = 0;
@@ -37,6 +40,15 @@ static void process_buttons(void);
 static void process_keypad(void);
 static void update_display(void);
 void statemachine_task(void *pvParameters);
+
+static inline uint32_t now_ms(void) {
+    return (uint32_t)(esp_timer_get_time() / 1000ULL);
+}
+
+static float calculate_dispensed(float current_mass) {
+    float dispensed = (s_initial_mass_kg - current_mass) + s_already_dispensed_kg;
+    return dispensed > 0.0f ? dispensed : 0.0f;
+}
 
 esp_err_t statemachine_init(void) {
     s_price_per_kg = loadcell_get_price_per_kg();
@@ -59,54 +71,51 @@ void statemachine_set_state(system_state_t new_state) {
             relay_off();
             safety_set_monitoring(false);
             safety_clear_trigger();
+            s_safety_monitoring_armed = false;
             break;
         case STATE_PRICE_ENTRY:
             memset(s_price_buffer, 0, sizeof(s_price_buffer));
             s_price_len = 0;
+            s_paid_amount = 0.0f;
+            s_target_kg = 0.0f;
             break;
         case STATE_READY:
             break;
         case STATE_DISPENSING:
+            if (!loadcell_has_fresh_reading(LOADCELL_STALE_TIMEOUT_MS)) {
+                ESP_LOGW(TAG, "Load-cell data is stale; refusing to open relay");
+                statemachine_set_state(STATE_SAFETY_STOP);
+                break;
+            }
             if (s_previous_state == STATE_PAUSED) {
-                s_initial_mass_kg = loadcell_read_kg();
+                s_initial_mass_kg = loadcell_get_latest_kg();
             } else {
-                s_initial_mass_kg = loadcell_read_kg();
+                s_initial_mass_kg = loadcell_get_latest_kg();
                 s_already_dispensed_kg = 0.0f;
             }
             relay_on();
-            // Add longer, configurable settle delay (600 ms)
-            #define RELAY_SETTLE_MS 600
-            vTaskDelay(pdMS_TO_TICKS(RELAY_SETTLE_MS));
-            // Re‑enable safety monitoring after relay on
-            safety_set_monitoring(true);
-            // ---- verify HX711 is providing data ----
-            static const int SENSOR_RETRY_COUNT = 5;
-            static const TickType_t SENSOR_WAIT_TICKS = pdMS_TO_TICKS(200);
-            bool sensor_ok = false;
-            for (int i = 0; i < SENSOR_RETRY_COUNT; ++i) {
-                float mass = loadcell_read_kg();
-                if (mass > 0.0f) { sensor_ok = true; break; }
-                vTaskDelay(SENSOR_WAIT_TICKS);
-            }
-            if (!sensor_ok) {
-                ESP_LOGW(TAG, "Load‑cell not responding after relay on – aborting dispense");
-                statemachine_set_state(STATE_SAFETY_STOP);
-                break; // exit case block
-            }
-            // keep the original initial‑mass capture
-            s_initial_mass_kg = loadcell_read_kg();
+            s_safety_monitoring_armed = false;
+            s_safety_enable_ms = now_ms() + RELAY_SETTLE_MS;
             break;
         case STATE_PAUSED:
+            if (s_previous_state == STATE_DISPENSING) {
+                float current_mass = loadcell_get_latest_kg();
+                s_already_dispensed_kg = calculate_dispensed(current_mass);
+                s_initial_mass_kg = current_mass;
+            }
             relay_off();
             safety_set_monitoring(false);
+            s_safety_monitoring_armed = false;
             break;
         case STATE_SAFETY_STOP:
             relay_off();
             safety_set_monitoring(false);
+            s_safety_monitoring_armed = false;
             break;
         case STATE_CALIBRATION:
             relay_off();
             safety_set_monitoring(false);
+            s_safety_monitoring_armed = false;
             break;
     }
 }
@@ -147,6 +156,7 @@ static void process_keypad(void) {
                 if (s_price_len < 15) s_price_buffer[s_price_len++] = key;
             } else if (key == KEYPAD_ENTER_KEY) {
                 s_paid_amount = atof(s_price_buffer);
+                s_price_per_kg = loadcell_get_price_per_kg();
                 if (s_paid_amount > 0 && s_price_per_kg > 0) {
                     s_target_kg = s_paid_amount / s_price_per_kg;
                     statemachine_set_state(STATE_READY);
@@ -166,23 +176,39 @@ static void process_keypad(void) {
 }
 
 static void state_dispensing_handler(void) {
-    float current_mass = loadcell_read_kg();
-    float dispensed_kg = (s_initial_mass_kg - current_mass) + s_already_dispensed_kg;
+    if (safety_get_event() || safety_is_triggered()) {
+        statemachine_set_state(STATE_SAFETY_STOP);
+        return;
+    }
+    if (!loadcell_has_fresh_reading(LOADCELL_STALE_TIMEOUT_MS)) {
+        ESP_LOGW(TAG, "Load-cell data stale during dispensing");
+        safety_trigger();
+        statemachine_set_state(STATE_SAFETY_STOP);
+        return;
+    }
+
+    float current_mass = loadcell_get_latest_kg();
+    float dispensed_kg = calculate_dispensed(current_mass);
     if (dispensed_kg >= s_target_kg) {
         statemachine_set_state(STATE_IDLE);
         ESP_LOGI(TAG, "Dispensing complete: %.2f / %.2f kg", dispensed_kg, s_target_kg);
         return;
     }
-    // Safety check disabled – we removed safety_get_event call
 }
 
 void statemachine_task(void *pvParameters) {
     TickType_t last_wake = xTaskGetTickCount();
     while (1) {
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(100));
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(STATE_MACHINE_INTERVAL_MS));
         process_buttons();
         process_keypad();
-        if (s_current_state == STATE_DISPENSING) state_dispensing_handler();
+        if (s_current_state == STATE_DISPENSING) {
+            if (!s_safety_monitoring_armed && (int32_t)(now_ms() - s_safety_enable_ms) >= 0) {
+                safety_set_monitoring(true);
+                s_safety_monitoring_armed = true;
+            }
+            state_dispensing_handler();
+        }
         update_display();
     }
 }
@@ -191,11 +217,9 @@ static void update_display(void) {
     float empty_mass = 0.0f;   // no hardcoded 12 kg
     float paid = s_paid_amount;
     float dispensed = 0.0f;
-    float total_weight = loadcell_read_kg();
+    float total_weight = loadcell_get_latest_kg();
     if (s_current_state == STATE_DISPENSING || s_current_state == STATE_PAUSED) {
-        float current_mass = loadcell_read_kg();
-        dispensed = (s_initial_mass_kg - current_mass) + s_already_dispensed_kg;
-        if (dispensed < 0) dispensed = 0;
+        dispensed = calculate_dispensed(total_weight);
     }
     display_manager_update(s_current_state, empty_mass, paid, dispensed, total_weight, s_price_buffer, s_price_len);
 }

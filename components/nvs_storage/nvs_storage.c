@@ -9,8 +9,6 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 
-static const char *TAG = "NVS";
-
 static esp_err_t nvs_open_handle(nvs_handle_t *out_handle) {
     nvs_handle_t handle;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
@@ -26,10 +24,10 @@ esp_err_t nvs_save_float(const char *key, float value) {
     if (err != ESP_OK) return err;
     
     err = nvs_set_blob(handle, key, &value, sizeof(value));
-    nvs_close(handle);
     if (err == ESP_OK) {
         err = nvs_commit(handle);
     }
+    nvs_close(handle);
     return err;
 }
 
@@ -58,10 +56,10 @@ esp_err_t nvs_save_int(const char *key, int32_t value) {
     if (err != ESP_OK) return err;
     
     err = nvs_set_i32(handle, key, value);
-    nvs_close(handle);
     if (err == ESP_OK) {
         err = nvs_commit(handle);
     }
+    nvs_close(handle);
     return err;
 }
 
